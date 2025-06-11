@@ -1,0 +1,8 @@
+torch
+torchvision
+torchaudio
+Pillow
+PyQt5
+# Alternatively, for PySide6:
+# pyside6
+matplotlib
