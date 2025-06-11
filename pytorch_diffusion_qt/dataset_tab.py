@@ -72,14 +72,16 @@ class DatasetGenerationThread(QThread):
 
 class DatasetTab(QWidget):
     # Signal to notify other parts of the app (e.g., training tab) about new dataset/vocab
-    dataset_updated = pyqtSignal(object, int) # dataset_info (e.g. path or object), vocab_size
+    # new: emojis_list, emoji_to_idx_dict, font_path_str, vocab_size_int
+    dataset_updated = pyqtSignal(list, dict, str, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.image_size = 16 # Default, can be configurable later
         self.generated_images_tensor = None
-        self.generated_vocab = None
-        self.generated_emoji_to_idx = None
+        self.generated_vocab = None # Will store the list of unique emojis from generation
+        self.generated_emoji_to_idx = None # Will store the emoji to index mapping
+        self.last_font_path_used = "" # Store the font path used for the last successful generation
 
         self._setup_ui()
 
@@ -172,7 +174,10 @@ class DatasetTab(QWidget):
         font_path = self.font_path_edit.text()
         if not font_path or not os.path.exists(font_path):
             font_path = None # Pass None to use default font search in backend
+            self.last_font_path_used = "" # Reset if invalid path was attempted
             self.status_label.setText("Status: Font path not provided or invalid. Using default font search.")
+        else:
+            self.last_font_path_used = font_path # Store valid path attempt
 
         self.generate_button.setEnabled(False)
         self.status_label.setText("Status: Generating dataset...")
@@ -199,8 +204,13 @@ class DatasetTab(QWidget):
             self.stats_label.setText(f"Generated Images: {images_tensor.shape[0]} | Vocabulary Size: {len(vocab)}")
             self._update_preview_area(images_tensor)
             # Emit signal that dataset has been updated
-            # Pass some info, e.g., the tensor itself or path if saved, and vocab size
-            self.dataset_updated.emit(images_tensor, len(vocab))
+            font_path_emit = self.last_font_path_used if self.last_font_path_used and os.path.exists(self.last_font_path_used) else ""
+            self.dataset_updated.emit(
+                self.generated_vocab,       # List of unique emojis
+                self.generated_emoji_to_idx, # Dict mapping emoji to index
+                font_path_emit,             # Font path used
+                len(self.generated_vocab)   # Vocabulary size
+            )
         else:
             self.stats_label.setText(f"Generated Images: 0 | Vocabulary Size: {len(vocab)}")
             QMessageBox.information(self, "Dataset Generation", "No images were generated. Check emoji input and font.")

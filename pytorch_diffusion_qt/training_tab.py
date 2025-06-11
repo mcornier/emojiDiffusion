@@ -129,8 +129,10 @@ class TrainingTab(QWidget):
         super().__init__(parent)
         self._setup_ui()
         self.training_thread = None
-        self.current_dataset_emojis = None # This should be updated from DatasetTab
-        self.current_font_path = None      # This too
+        self.current_dataset_emojis = None
+        self.current_emoji_to_idx = None
+        self.current_font_path = None
+        self.current_vocab_size = 0
         self.epochs_history = []
         self.loss_history = []
 
@@ -218,26 +220,25 @@ class TrainingTab(QWidget):
         if ckpt_file:
             self.checkpoint_path_edit.setText(ckpt_file)
 
-    def update_active_dataset(self, dataset_tensor_or_info, vocab_size):
-        # This slot will be connected to dataset_tab.dataset_updated signal
-        # For now, let's assume we just need the emoji list and font path if they were part of dataset_info
-        # Or, the 'train_diffusion_model' might take the dataset object directly.
-        # The current train_diffusion_model re-creates the dataset from emoji_list.
-        # So we need the emoji_list used by dataset_tab.
-        # This is a simplification. Ideally DatasetTab would provide the actual list of emojis used.
-        # For now, let's assume we can get it or we use a default.
+    @pyqtSlot(list, dict, str, int) # emojis, emoji_to_idx, font_path, vocab_size
+    def update_active_dataset_info(self, emojis: list, emoji_to_idx: dict, font_path: str, vocab_size: int):
+        self.current_dataset_emojis = emojis
+        self.current_emoji_to_idx = emoji_to_idx
+        self.current_font_path = font_path
+        self.current_vocab_size = vocab_size
 
-        # A better approach: DatasetTab emits the list of emojis it used.
-        # For this example, we'll assume self.current_dataset_emojis is somehow set.
-        # If dataset_tensor_or_info is the actual list of emojis:
-        if isinstance(dataset_tensor_or_info, list): # Simplistic check
-             self.current_dataset_emojis = dataset_tensor_or_info
-             QMessageBox.information(self, "Dataset Updated", f"Training tab received dataset with {len(self.current_dataset_emojis)} emojis, vocab size {vocab_size}.")
+        if emojis:
+            font_display_name = 'Default' if not font_path else os.path.basename(font_path)
+            QMessageBox.information(self, "Dataset Updated",
+                                  f"Training tab received dataset with {len(emojis)} emojis (Vocab: {vocab_size}). Font: {font_display_name}")
+            self.status_label.setText(f"Status: Ready to train with new dataset (Vocab: {vocab_size}).")
+            # Enable start button if it was disabled due to no dataset
+            if not self.start_button.isEnabled() and not (self.training_thread and self.training_thread.isRunning()):
+                 self.start_button.setEnabled(True)
         else:
-             # Fallback or use a default list if not directly passed
-             self.current_dataset_emojis = ['😀', '😂', '😍'] # Default if not properly received
-             QMessageBox.information(self, "Dataset Info", f"Training tab acknowledged dataset update (vocab size {vocab_size}). Using default emoji list for now.")
-        self.status_label.setText(f"Status: Ready to train with new dataset (Vocab: {vocab_size}).")
+            QMessageBox.warning(self, "Dataset Issue", "Received empty or invalid dataset information.")
+            self.status_label.setText(f"Status: Waiting for valid dataset.")
+            self.start_button.setEnabled(False) # Disable if dataset is not valid
 
 
     def _start_training(self):
@@ -245,13 +246,10 @@ class TrainingTab(QWidget):
             QMessageBox.warning(self, "Training In Progress", "A training session is already running.")
             return
 
-        if self.current_dataset_emojis is None:
-            # Try to get emojis from dataset_tab if not set, or use a default.
-            # This part needs better inter-tab communication in the main window.
-             QMessageBox.warning(self, "No Dataset", "Please generate a dataset in the 'Dataset' tab first, or ensure this tab is updated with it.")
-             # For now, provide a default if none is actively set.
-             self.current_dataset_emojis = ['😀', '😂', '😍', '👍', '🎉'] # Fallback
-             self.status_label.setText("Status: Using fallback emoji list for training.")
+        if not self.current_dataset_emojis or self.current_vocab_size == 0:
+             QMessageBox.warning(self, "No Dataset", "Please generate a dataset in the 'Dataset' tab and ensure it's loaded here.")
+             self.status_label.setText("Status: Cannot start training. Dataset not available or empty.")
+             return
 
 
         epochs = self.epochs_spinbox.value()

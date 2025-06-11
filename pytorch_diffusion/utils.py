@@ -163,3 +163,25 @@ def p_sample_loop(model, shape, num_timesteps:int = TIMESTEPS, context_embedding
 # If it needs to be configurable per model instance or per run,
 # it should be passed as an argument to functions or stored in a class.
 # For now, using the global TIMESTEPS for simplicity.
+
+@torch.no_grad()
+def denoise_single_step(model, x_t: torch.Tensor, t_tensor: torch.Tensor, t_index: int, context_idx_tensor: torch.Tensor = None):
+    device = x_t.device
+    model.to(device)
+    model.eval()
+
+    betas_t = BETAS.to(device)[t_index]
+    sqrt_one_minus_alphas_cumprod_t = SQRT_ONE_MINUS_ALPHAS_CUMPROD.to(device)[t_index]
+    sqrt_recip_alphas_t = torch.sqrt(1.0 / ALPHAS.to(device)[t_index])
+
+    predicted_noise = model(x_t, t_tensor, context_idx_tensor)
+    model_mean = sqrt_recip_alphas_t * (x_t - (betas_t / sqrt_one_minus_alphas_cumprod_t) * predicted_noise)
+
+    if t_index == 0:
+        x_prev = model_mean
+    else:
+        posterior_variance_t = POSTERIOR_VARIANCE.to(device)[t_index]
+        noise_for_sampling = torch.randn_like(x_t)
+        x_prev = model_mean + torch.sqrt(posterior_variance_t) * noise_for_sampling
+
+    return predicted_noise, x_prev
