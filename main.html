@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Générateur d'Emojis par Diffusion (16x16)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; user-select: none; }
+        .tab-button { padding: 0.5rem 1rem; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.3s ease; white-space: nowrap; }
+        .tab-button.active { border-bottom-color: #4f46e5; color: #4f46e5; font-weight: 600; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .emoji-input { width: 4rem; height: 4rem; font-size: 2.5rem; text-align: center; border: 2px dashed #d1d5db; border-radius: 0.5rem; }
+        .main-canvas { width: 256px; height: 256px; background-color: #e5e7eb; border-radius: 0.5rem; image-rendering: pixelated; /* Agrandit les pixels sans flou */ }
+        #dataset-preview-container { max-height: 400px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: 4px; }
+        .dataset-image-preview { width: 36px; height: 36px; border: 1px solid #ddd; image-rendering: pixelated; background-color: white; }
+        #loss-chart { border: 1px solid #ddd; background-color: #f9f9f9; }
+        .control-button { padding: 0.5rem 1rem; border-radius: 0.375rem; font-weight: 600; transition: all 0.15s ease-in-out; }
+        .control-button:disabled { background-color: #d1d5db; cursor: not-allowed; }
+        input[type="file"] { display: none; }
+        .custom-file-upload { border: 1px solid #ccc; display: inline-block; padding: 6px 12px; cursor: pointer; background-color: #f0f0f0; color: #333; border-radius: 0.375rem; font-weight: 600; transition: background-color 0.15s ease-in-out; }
+        .custom-file-upload:hover { background-color: #e0e0e0; }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+</head>
+<body class="bg-gray-100 min-h-screen flex flex-col items-center p-4">
+
+    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-6xl">
+        <header class="mb-6 text-center">
+            <h1 class="text-2xl sm:text-3xl font-bold text-gray-800">Générateur d'Emojis par Diffusion</h1>
+            <p class="text-sm text-gray-500 mt-1">Mini-modèle de diffusion ( bruit -> image ) entraîné sur des emojis 16x16px</p>
+        </header>
+
+        <div class="mb-6 border-b border-gray-200 overflow-x-auto">
+            <nav class="flex justify-center space-x-2 sm:space-x-4" aria-label="Tabs">
+                <button class="tab-button active" data-tab="inference">Inférence</button>
+                <button class="tab-button" data-tab="training">Entraînement</button>
+                <button class="tab-button" data-tab="dataset">Dataset</button>
+                <button class="tab-button" data-tab="weights">Poids</button>
+            </nav>
+        </div>
+
+        <div>
+            <!-- Tab Inférence -->
+            <div id="tab-inference" class="tab-content active">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <!-- Colonne de Contrôle -->
+                    <div class="p-4 bg-gray-50 rounded-lg shadow-inner md:col-span-1">
+                        <h2 class="text-lg font-semibold text-gray-700 mb-4">Contrôles de Génération</h2>
+                        
+                        <div class="mb-6">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Contexte Emoji (optionnel)</label>
+                            <div class="flex items-center justify-center space-x-2">
+                                <input type="text" id="emoji-context-1" class="emoji-input" maxlength="2">
+                            </div>
+                            <p class="text-xs text-center text-gray-500 mt-2">Laissez vide pour une génération non conditionnée.</p>
+                        </div>
+                        
+                        <div class="space-y-3">
+                            <button id="start-inference-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white control-button">Démarrer / Réinitialiser l'Inférence</button>
+                            <button id="denoise-step-btn" class="w-full bg-teal-500 hover:bg-teal-600 text-white control-button" disabled>Débruiter (1 Étape)</button>
+                        </div>
+                        
+                        <div id="inference-status-container" class="mt-6 text-center p-3 bg-white rounded-lg border">
+                            <p class="text-sm font-medium text-gray-800">État: <span id="inference-status" class="font-normal text-gray-600">En attente</span></p>
+                            <p class="text-sm font-medium text-gray-800 mt-1">Étape de temps (t): <span id="inference-timestep" class="font-normal text-gray-600">N/A</span></p>
+                        </div>
+                    </div>
+                    
+                    <!-- Colonne de Visualisation -->
+                    <div class="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4 items-center justify-items-center p-4">
+                        <div>
+                            <h3 class="text-lg font-semibold text-gray-700 mb-2 text-center">Image Générée</h3>
+                            <canvas id="main-canvas" class="main-canvas shadow-lg"></canvas>
+                        </div>
+                        <div>
+                            <h3 class="text-lg font-semibold text-gray-700 mb-2 text-center">Bruit Prédit</h3>
+                            <canvas id="noise-canvas" class="main-canvas shadow-lg bg-gray-200"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab Entraînement -->
+            <div id="tab-training" class="tab-content">
+                 <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="md:col-span-1 space-y-4 p-4 bg-gray-50 rounded-lg shadow-inner">
+                        <h3 class="text-lg font-medium text-gray-600 mb-2">Paramètres</h3>
+                        <div>
+                             <label for="training-mode" class="block text-sm font-medium text-gray-700">Mode d'entraînement :</label>
+                             <select id="training-mode" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+                                 <option value="diffusion">Diffusion (Prédire le bruit)</option>
+                                 <option value="autoencoder" selected>Autoencoder (Restituer l'image)</option>
+                             </select>
+                             <p class="text-xs text-gray-500 mt-1">Utilisez l'Autoencoder pour pré-entraîner.</p>
+                        </div>
+                        <div>
+                            <label for="epochs" class="block text-sm font-medium text-gray-700">Époques:</label>
+                            <input type="number" id="epochs" value="50" min="1" max="200" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+                        </div>
+                        <div>
+                            <label for="learning-rate" class="block text-sm font-medium text-gray-700">Taux d'apprentissage:</label>
+                            <input type="number" id="learning-rate" value="0.0002" min="0.00001" max="0.01" step="0.00001" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+                        </div>
+                        <div>
+                            <label for="batch-size" class="block text-sm font-medium text-gray-700">Taille du lot (Batch Size):</label>
+                            <input type="number" id="batch-size" value="32" min="4" max="128" step="4" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+                        </div>
+                        <button id="start-training-button" class="w-full bg-red-500 hover:bg-red-600 text-white control-button">Démarrer l'Entraînement</button>
+                        <p id="training-status" class="text-xs text-gray-500 mt-1 h-8 text-center"></p>
+                    </div>
+                    <div class="md:col-span-2 p-4">
+                        <h3 class="text-lg font-medium text-gray-600 mb-2">Graphique de Perte (Loss)</h3>
+                        <div id="loss-chart-container">
+                            <canvas id="loss-chart" width="400" height="250"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab Dataset -->
+            <div id="tab-dataset" class="tab-content">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="p-4 bg-gray-50 rounded-lg shadow-inner">
+                        <h3 class="text-lg font-medium text-gray-600 mb-4">Générer un Dataset d'Emojis</h3>
+                        <div class="space-y-3">
+                            <div>
+                                <label for="emoji-list" class="block text-sm font-medium text-gray-700">Liste d'emojis à générer</label>
+                                <textarea id="emoji-list" rows="8" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm font-mono text-base">😀😁😂🤣😃😄😅😆😉�😋😎😍😘🥰😗😙🥲🤔🤩🤗🙂😚🤨😐😑😶🫥😮😥😣😏🙄😤😠😡🤬🤯🥵🥶😳🤪😵😵‍💫😲😱😨😰😢😭😮‍💨🥱😴🤤😪🤢🤮🤧😇🤠🥳🥺🥸🧐😕😟🙁😮😯😲😳🥺😦😧😨😰😥😢😭😱😖😣😞😓😩😫🥱😤😡😠🤬😈👿💀☠️💩🤡👹👺👻👽👾🤖😺😸😹😻😼😽🙀😿😾🙈🙉🙊👋🤚🖐️✋🖖👌🤌🤏✌️🤞🤟🤘🤙👈👉👆🖕👇☝️👍👎✊👊🤛🤜👏🙌🫶👐🤲🤝🙏✍️💅🤳💪🦾🦿🦵🦶👂🦻👃🧠🫀🫁🦷🦴👀👁️👅👄👶🧒🧑🧓🙍‍♂️🙍‍♀️🙎‍♂️🙎‍♀️🙅‍♂️🙅‍♀️🙆‍♂️🙆‍♀️💁‍♂️💁‍♀️🙋‍♂️🙋‍♀️🧏‍♂️🧏‍♀️🙇‍♂️🙇‍♀️🤦‍♂️🤦‍♀️🤷‍♂️🤷‍♀️👨‍⚕️👩‍⚕️👨‍🎓👩‍🎓👨‍🏫👩‍🏫👨‍⚖️👩‍⚖️👨‍🌾👩‍🌾👨‍🍳👩‍🍳👨‍🔧👩‍🔧👨‍🏭👩‍🏭👨‍💼👩‍💼👨‍🔬👩‍🔬👨‍💻👩‍💻👨‍🎤👩‍🎤👨‍🎨👩‍🎨👨‍✈️👩‍✈️👨‍🚀👩‍🚀👨‍🚒👩‍🚒👮‍♂️👮‍♀️🕵️‍♂️🕵️‍♀️💂‍♂️💂‍♀️🥷👷‍♂️👷‍♀️🫅🤴👸👳‍♂️👳‍♀️👲🧕🤵‍♂️🤵‍♀️👰‍♂️👰‍♀️🤰🤱👨‍🍼👩‍🍼🧑‍🍼👼🎅🤶🦸‍♂️🦸‍♀️🦹‍♂️🦹‍♀️🧙‍♂️🧙‍♀️🧚‍♂️🧚‍♀️🧛‍♂️🧛‍♀️🧜‍♂️🧜‍♀️🧝‍♂️🧝‍♀️🧞‍♂️🧞‍♀️🧟‍♂️🧟‍♀️</textarea>
+                            </div>
+                            <button id="generate-dataset-button" class="w-full bg-teal-500 hover:bg-teal-600 text-white control-button">Générer le Dataset</button>
+                            <p id="dataset-generation-status" class="text-xs text-gray-500 mt-1 h-4 text-center"></p>
+                        </div>
+                    </div>
+                    <div class="p-4">
+                        <h3 class="text-lg font-medium text-gray-600 mb-2">Aperçu du Dataset</h3>
+                        <p class="text-xs text-gray-500 mb-2">Total images: <span id="total-dataset-images">0</span></p>
+                        <div id="dataset-preview-container" class="p-2 border border-gray-200 rounded bg-white">
+                            <p class="text-xs text-gray-500 italic col-span-full">Aucun dataset chargé ou généré.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab Poids -->
+            <div id="tab-weights" class="tab-content">
+                <div class="p-4 bg-gray-50 rounded-lg shadow-inner max-w-md mx-auto">
+                    <h3 class="text-lg font-medium text-gray-600 mb-4 text-center">Gestion des Poids du Modèle</h3>
+                    <div class="flex flex-col space-y-3 items-center">
+                        <button id="export-weights-button" class="w-full bg-green-600 hover:bg-green-700 text-white control-button">Exporter les Poids (.json)</button>
+                        <label for="import-weights-file" class="custom-file-upload w-full text-center">Importer des Poids (.json)</label>
+                        <input type="file" id="import-weights-file" accept=".json">
+                        <p id="weights-status" class="text-xs text-gray-500 mt-1 h-4"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // --- Configuration & Constants ---
+        const IMG_SIZE = 16;
+        const IMG_CHANNELS = 3; // RGB
+        const LATENT_DIM = 256; // Dimension pour l'image encodée
+        const CONTEXT_DIM = 64; // Dimension pour l'embedding de l'emoji contexte
+        const TIME_DIM = 64;    // Dimension pour l'embedding du pas de temps
+
+        const TIMESTEPS = 25; // Nombre d'étapes de diffusion
+        
+        let EMOJI_VOCAB = ['[MASK]']; // Vocabulaire des emojis, [MASK] est à l'index 0
+        let EMOJI_TO_INDEX = {'[MASK]': 0};
+
+        // --- DOM Elements ---
+        const tabs = {
+            inference: document.getElementById('tab-inference'),
+            training: document.getElementById('tab-training'),
+            dataset: document.getElementById('tab-dataset'),
+            weights: document.getElementById('tab-weights'),
+        };
+        const tabButtons = document.querySelectorAll('.tab-button');
+        const mainCanvas = document.getElementById('main-canvas');
+        mainCanvas.width = 256; mainCanvas.height = 256;
+        const mainCtx = mainCanvas.getContext('2d');
+        const noiseCanvas = document.getElementById('noise-canvas');
+        noiseCanvas.width = 256; noiseCanvas.height = 256;
+        const noiseCtx = noiseCanvas.getContext('2d');
+
+        // Inference
+        const emojiContextInput = document.getElementById('emoji-context-1');
+        const startInferenceBtn = document.getElementById('start-inference-btn');
+        const denoiseStepBtn = document.getElementById('denoise-step-btn');
+        const inferenceStatusEl = document.getElementById('inference-status');
+        const inferenceTimestepEl = document.getElementById('inference-timestep');
+
+        // Training
+        const trainingModeSelect = document.getElementById('training-mode');
+        const epochsInput = document.getElementById('epochs');
+        const learningRateInput = document.getElementById('learning-rate');
+        const batchSizeInput = document.getElementById('batch-size');
+        const startTrainingBtn = document.getElementById('start-training-button');
+        const trainingStatusEl = document.getElementById('training-status');
+        const lossChartCanvas = document.getElementById('loss-chart');
+        const lossChartCtx = lossChartCanvas.getContext('2d');
+        
+        // Dataset
+        const emojiListInput = document.getElementById('emoji-list');
+        const generateDatasetBtn = document.getElementById('generate-dataset-button');
+        const datasetGenStatusEl = document.getElementById('dataset-generation-status');
+        const datasetPreviewContainer = document.getElementById('dataset-preview-container');
+        const totalDatasetImagesEl = document.getElementById('total-dataset-images');
+
+        // Weights
+        const exportWeightsBtn = document.getElementById('export-weights-button');
+        const importWeightsFile = document.getElementById('import-weights-file');
+        const weightsStatusEl = document.getElementById('weights-status');
+
+        // --- Global State ---
+        let diffusionModel;
+        let dataset = { tensors: [], base64: [], emojis: [] }; // {tensors: [tf.Tensor], base64: [string], emojis: [char]}
+        let trainingHistory = [];
+        let inferenceState = { x: null, t: 0, contextIdx: 0 }; // x: current noisy tensor, t: current timestep
+        
+        // --- Diffusion Schedule ---
+        function linearBetaSchedule(timesteps) {
+            const betaStart = 0.0001;
+            const betaEnd = 0.02;
+            return tf.linspace(betaStart, betaEnd, timesteps);
+        }
+
+        const betas = linearBetaSchedule(TIMESTEPS);
+        const alphas = tf.sub(1.0, betas);
+        const alphasCumprod = tf.cumprod(alphas);
+        
+        function forwardNoise(x0, t) {
+            return tf.tidy(() => {
+                const noise = tf.randomNormal(x0.shape);
+                const alphaBarT = alphasCumprod.gather(t).reshape([-1, 1, 1, 1]);
+                const sqrtAlphaBarT = tf.sqrt(alphaBarT);
+                const sqrtOneMinusAlphaBarT = tf.sqrt(tf.sub(1.0, alphaBarT));
+
+                const noisedImage = tf.add(
+                    tf.mul(x0, sqrtAlphaBarT),
+                    tf.mul(noise, sqrtOneMinusAlphaBarT)
+                );
+                return { noisedImage, noise };
+            });
+        }
+        
+        // --- Model Definition ---
+        
+        class MultiHeadAttention extends tf.layers.Layer {
+            constructor(config) {
+                super(config);
+                this.latentDim = config.latentDim;
+                this.numHeads = config.numHeads;
+                if (this.latentDim % this.numHeads !== 0) {
+                    throw new Error("latentDim must be divisible by numHeads");
+                }
+                this.headDim = this.latentDim / this.numHeads;
+            }
+
+            build(inputShape) {
+                this.toQ = this.addWeight('q_kernel', [inputShape[inputShape.length - 1], this.latentDim], 'float32', tf.initializers.glorotUniform());
+                this.toK = this.addWeight('k_kernel', [inputShape[inputShape.length - 1], this.latentDim], 'float32', tf.initializers.glorotUniform());
+                this.toV = this.addWeight('v_kernel', [inputShape[inputShape.length - 1], this.latentDim], 'float32', tf.initializers.glorotUniform());
+                this.outputDense = this.addWeight('o_kernel', [this.latentDim, this.latentDim], 'float32', tf.initializers.glorotUniform());
+                this.outputBias = this.addWeight('o_bias', [this.latentDim], 'float32', tf.initializers.zeros());
+            }
+
+            call(inputs, kwargs) {
+                // IMPORTANT: NO tf.tidy() here. It prevents gradient flow.
+                const [query] = Array.isArray(inputs) ? inputs : [inputs];
+
+                let q = tf.matMul(query, this.toQ.val); // Use .val to get the tensor
+                let k = tf.matMul(query, this.toK.val);
+                let v = tf.matMul(query, this.toV.val);
+
+                q = q.expandDims(1);
+                k = k.expandDims(1);
+                v = v.expandDims(1);
+
+                const reshapeForMultihead = (tensor) => {
+                    const [batchSize, seqLen, _] = tensor.shape;
+                    return tensor.reshape([batchSize, seqLen, this.numHeads, this.headDim]).transpose([0, 2, 1, 3]);
+                };
+                q = reshapeForMultihead(q);
+                k = reshapeForMultihead(k);
+                v = reshapeForMultihead(v);
+
+                const scale = tf.scalar(Math.sqrt(this.headDim));
+                let scores = tf.matMul(q, k, false, true).div(scale);
+                const attentionWeights = tf.softmax(scores, -1);
+                
+                let attentionOutput = tf.matMul(attentionWeights, v);
+                
+                attentionOutput = attentionOutput.transpose([0, 2, 1, 3]);
+                attentionOutput = attentionOutput.reshape([-1, 1, this.latentDim]).squeeze([1]);
+
+                return tf.add(tf.matMul(attentionOutput, this.outputDense.val), this.outputBias.val);
+            }
+            
+            computeOutputShape(inputShape) {
+                 return [inputShape[0], this.latentDim];
+            }
+
+            static get className() {
+                return 'MultiHeadAttention';
+            }
+        }
+        tf.serialization.registerClass(MultiHeadAttention);
+
+
+        function applyTransformerBlock(x, latentDim, numHeads, blockName) {
+            const norm1 = tf.layers.layerNormalization({name: `${blockName}_norm1`}).apply(x);
+            const attention = new MultiHeadAttention({latentDim, numHeads, name: `${blockName}_mha`}).apply(norm1);
+            const add1 = tf.layers.add({name: `${blockName}_add1`}).apply([x, attention]);
+
+            const norm2 = tf.layers.layerNormalization({name: `${blockName}_norm2`}).apply(add1);
+            const dense1 = tf.layers.dense({ units: latentDim * 4, activation: 'gelu', name: `${blockName}_dense1` }).apply(norm2);
+            const dense2 = tf.layers.dense({ units: latentDim, name: `${blockName}_dense2` }).apply(dense1);
+            const add2 = tf.layers.add({name: `${blockName}_add2`}).apply([add1, dense2]);
+            return add2;
+        }
+
+        function buildDiffusionModel() {
+            try {
+                const imageInput = tf.input({shape: [IMG_SIZE, IMG_SIZE, IMG_CHANNELS], name: "image_input"});
+                const timeInput = tf.input({shape: [1], name: "time_input"});
+                const contextInput = tf.input({shape: [1], name: "context_input"});
+
+                let x = tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: 'same', activation: 'relu' }).apply(imageInput);
+                x = tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: 'same', activation: 'relu', strides: 2 }).apply(x);
+                x = tf.layers.conv2d({ filters: 128, kernelSize: 3, padding: 'same', activation: 'relu', strides: 2 }).apply(x);
+                x = tf.layers.flatten().apply(x);
+                const imageEmbedding = tf.layers.dense({ units: LATENT_DIM, name: 'image_embedding' }).apply(x);
+
+                const timeEmbeddingLayer = tf.layers.embedding({inputDim: TIMESTEPS + 1, outputDim: TIME_DIM});
+                const timeEmbedding = timeEmbeddingLayer.apply(timeInput);
+                const timeEmbeddingFlat = tf.layers.flatten().apply(timeEmbedding);
+
+                const contextEmbeddingLayer = tf.layers.embedding({inputDim: EMOJI_VOCAB.length, outputDim: CONTEXT_DIM});
+                const contextEmbedding = contextEmbeddingLayer.apply(contextInput);
+                const contextEmbeddingFlat = tf.layers.flatten().apply(contextEmbedding);
+                
+                let fused = tf.layers.concatenate().apply([imageEmbedding, timeEmbeddingFlat, contextEmbeddingFlat]);
+                const transformerInput = tf.layers.dense({ units: LATENT_DIM }).apply(fused);
+
+                let transformerOutput = transformerInput;
+                transformerOutput = applyTransformerBlock(transformerOutput, LATENT_DIM, 4, 'block1');
+                transformerOutput = applyTransformerBlock(transformerOutput, LATENT_DIM, 4, 'block2');
+                transformerOutput = applyTransformerBlock(transformerOutput, LATENT_DIM, 4, 'block3');
+                
+                let d = tf.layers.dense({ units: 4 * 4 * 128 }).apply(transformerOutput);
+                d = tf.layers.reshape({ targetShape: [4, 4, 128] }).apply(d);
+                d = tf.layers.conv2dTranspose({ filters: 64, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }).apply(d);
+                d = tf.layers.conv2dTranspose({ filters: 32, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }).apply(d);
+                const predictedOutput = tf.layers.conv2d({ filters: IMG_CHANNELS, kernelSize: 1, padding: 'same', name: 'predicted_output' }).apply(d);
+                
+                const model = tf.model({
+                    inputs: [imageInput, timeInput, contextInput],
+                    outputs: predictedOutput
+                });
+                
+                console.log("Modèle de diffusion construit.");
+                model.summary();
+                return model;
+            } catch(e) {
+                console.error("Erreur lors de la construction du modèle:", e);
+                alert("Erreur lors de la construction du modèle: " + e.message);
+                return null;
+            }
+        }
+
+        // --- Dataset Functions ---
+        const datasetOffscreenCanvas = document.createElement('canvas');
+        datasetOffscreenCanvas.width = IMG_SIZE;
+        datasetOffscreenCanvas.height = IMG_SIZE;
+        const datasetCtx = datasetOffscreenCanvas.getContext('2d', { willReadFrequently: true });
+        
+        async function generateEmojiImage(emoji) {
+            datasetCtx.fillStyle = 'white';
+            datasetCtx.fillRect(0, 0, IMG_SIZE, IMG_SIZE);
+            datasetCtx.textAlign = 'center';
+            datasetCtx.textBaseline = 'middle';
+            datasetCtx.font = `${IMG_SIZE-2}px sans-serif`;
+            datasetCtx.fillText(emoji, IMG_SIZE / 2, IMG_SIZE / 2 + 1);
+            
+            const imageData = datasetCtx.getImageData(0, 0, IMG_SIZE, IMG_SIZE);
+            const tensor = await tf.browser.fromPixels(imageData);
+            const normalizedTensor = tensor.toFloat().div(127.5).sub(1);
+            const base64 = datasetOffscreenCanvas.toDataURL();
+            tensor.dispose();
+            return { tensor: normalizedTensor, base64 };
+        }
+        
+        generateDatasetBtn.addEventListener('click', async () => {
+            const emojiString = emojiListInput.value;
+            const uniqueEmojis = [...new Set(Array.from(emojiString))].filter(e => e.trim() !== '');
+            datasetGenStatusEl.textContent = `Génération de ${uniqueEmojis.length} images...`;
+            
+            dataset.tensors.forEach(t => t.dispose());
+            dataset = { tensors: [], base64: [], emojis: [] };
+            EMOJI_VOCAB = ['[MASK]'];
+            EMOJI_TO_INDEX = {'[MASK]': 0};
+
+            for (const emoji of uniqueEmojis) {
+                const { tensor, base64 } = await generateEmojiImage(emoji);
+                dataset.tensors.push(tensor);
+                dataset.base64.push(base64);
+                dataset.emojis.push(emoji);
+
+                if (!EMOJI_TO_INDEX.hasOwnProperty(emoji)) {
+                    EMOJI_TO_INDEX[emoji] = EMOJI_VOCAB.length;
+                    EMOJI_VOCAB.push(emoji);
+                }
+            }
+            
+            updateDatasetPreview();
+            datasetGenStatusEl.textContent = `Dataset généré : ${dataset.tensors.length} images.`;
+            
+            if (diffusionModel) diffusionModel.dispose();
+            diffusionModel = buildDiffusionModel();
+        });
+        
+        function updateDatasetPreview() {
+            datasetPreviewContainer.innerHTML = '';
+            dataset.base64.forEach(b64 => {
+                const img = document.createElement('img');
+                img.src = b64;
+                img.className = 'dataset-image-preview';
+                datasetPreviewContainer.appendChild(img);
+            });
+            totalDatasetImagesEl.textContent = dataset.tensors.length;
+        }
+
+        // --- Training Functions ---
+        startTrainingBtn.addEventListener('click', async () => {
+            if (!diffusionModel) {
+                trainingStatusEl.textContent = "Erreur: Modèle non défini. Générez un dataset d'abord.";
+                return;
+            }
+            if (dataset.tensors.length === 0) {
+                trainingStatusEl.textContent = "Erreur: Le dataset est vide.";
+                return;
+            }
+            
+            startTrainingBtn.disabled = true;
+            trainingStatusEl.textContent = "Préparation de l'entraînement...";
+            trainingHistory = [];
+            drawLossChart();
+            
+            const trainingMode = trainingModeSelect.value;
+            const epochs = parseInt(epochsInput.value);
+            const learningRate = parseFloat(learningRateInput.value);
+            const batchSize = parseInt(batchSizeInput.value);
+            const optimizer = tf.train.adam(learningRate);
+
+            const allIndices = Array.from({length: dataset.tensors.length}, (_, i) => i);
+            const numBatches = Math.ceil(allIndices.length / batchSize);
+
+            for (let epoch = 0; epoch < epochs; epoch++) {
+                let epochLoss = 0;
+                tf.util.shuffle(allIndices);
+
+                for (let i = 0; i < numBatches; i++) {
+                    const batchIndices = allIndices.slice(i * batchSize, (i + 1) * batchSize);
+                    if (batchIndices.length === 0) continue;
+                    
+                    const f = () => {
+                        return tf.tidy(() => {
+                            const batchImages = tf.stack(batchIndices.map(idx => dataset.tensors[idx]));
+                            const batchEmojis = batchIndices.map(idx => dataset.emojis[idx]);
+                            const batchContexts = tf.tensor2d(batchEmojis.map(emoji => [EMOJI_TO_INDEX[emoji]]), [batchIndices.length, 1], 'int32');
+                            const t = tf.randomUniform([batchIndices.length, 1], 0, TIMESTEPS, 'int32');
+                            let loss;
+                            
+                            if (trainingMode === 'diffusion') {
+                                const { noisedImage, noise } = forwardNoise(batchImages, t);
+                                const predictedNoise = diffusionModel.apply([noisedImage, t, batchContexts]);
+                                loss = tf.losses.meanSquaredError(noise, predictedNoise).mean();
+                            } else { // autoencoder mode
+                                 const t_zeros = tf.zerosLike(t);
+                                 const context_zeros = tf.zerosLike(batchContexts);
+                                 const predictedImages = diffusionModel.apply([batchImages, t_zeros, context_zeros]);
+                                 loss = tf.losses.meanSquaredError(batchImages, predictedImages).mean();
+                            }
+                            return loss;
+                        });
+                    };
+                    
+                    const {grads, value} = optimizer.computeGradients(f, diffusionModel.trainableWeights);
+                    
+                    optimizer.applyGradients(grads);
+                    tf.dispose(grads);
+
+                    const lossValue = await value.data();
+                    value.dispose();
+                    epochLoss += lossValue[0];
+
+                    trainingStatusEl.textContent = `Époque ${epoch + 1}/${epochs}, Lot ${i+1}/${numBatches}, Loss: ${lossValue[0].toFixed(4)}`;
+                    await tf.nextFrame();
+                }
+
+                epochLoss /= numBatches;
+                trainingHistory.push(epochLoss);
+                drawLossChart();
+                console.log(`Epoch ${epoch + 1} Loss: ${epochLoss}`);
+            }
+
+            trainingStatusEl.textContent = "Entraînement terminé !";
+            startTrainingBtn.disabled = false;
+        });
+
+        function drawLossChart() {
+            const margin = {top: 20, right: 20, bottom: 40, left: 40};
+            const width = lossChartCanvas.width - margin.left - margin.right;
+            const height = lossChartCanvas.height - margin.top - margin.bottom;
+            lossChartCtx.clearRect(0, 0, lossChartCanvas.width, lossChartCanvas.height);
+            lossChartCtx.fillStyle = "#f9f9f9";
+            lossChartCtx.fillRect(0,0,lossChartCanvas.width, lossChartCanvas.height);
+            
+            if (trainingHistory.length === 0) {
+                lossChartCtx.fillStyle = 'black';
+                lossChartCtx.textAlign = 'center';
+                lossChartCtx.fillText("Aucune donnée d'entraînement.", lossChartCanvas.width / 2, lossChartCanvas.height / 2);
+                return;
+            }
+            
+            const maxLoss = Math.max(...trainingHistory, 0.1);
+            
+            lossChartCtx.strokeStyle = '#ccc'; lossChartCtx.lineWidth = 1;
+            lossChartCtx.beginPath(); lossChartCtx.moveTo(margin.left, margin.top); lossChartCtx.lineTo(margin.left, height + margin.top); lossChartCtx.lineTo(width + margin.left, height + margin.top); lossChartCtx.stroke();
+            
+            lossChartCtx.fillStyle = 'grey'; lossChartCtx.textAlign = 'right';
+            for(let i = 0; i <= 5; i++) {
+                const y = margin.top + (height - (i/5 * height));
+                lossChartCtx.fillText((maxLoss * i/5).toFixed(2), margin.left - 5, y + 3);
+            }
+            lossChartCtx.textAlign = 'center';
+            const numLabels = Math.min(trainingHistory.length, 10);
+            for(let i = 0; i < numLabels; i++) {
+                const epochIdx = Math.floor(i * (trainingHistory.length / numLabels));
+                const x = margin.left + (epochIdx / (trainingHistory.length -1 || 1)) * width;
+                lossChartCtx.fillText(epochIdx + 1, x, height + margin.top + 15);
+            }
+             lossChartCtx.fillText("Époque", width / 2 + margin.left, height + margin.top + 30);
+
+            lossChartCtx.beginPath();
+            lossChartCtx.strokeStyle = 'red';
+            lossChartCtx.lineWidth = 2;
+            trainingHistory.forEach((loss, index) => {
+                const x = margin.left + (index / (trainingHistory.length - 1 || 1)) * width;
+                const y = margin.top + height - (loss / maxLoss) * height;
+                if (index === 0) lossChartCtx.moveTo(x, y);
+                else lossChartCtx.lineTo(x, y);
+            });
+            lossChartCtx.stroke();
+        }
+
+        // --- Inference Functions ---
+        async function drawTensorToCanvas(tensor, canvas) {
+            const tensorToDraw = tf.tidy(() => {
+                return tensor.squeeze().add(1).mul(127.5).clipByValue(0, 255).asType('int32');
+            });
+            await tf.browser.toPixels(tensorToDraw, canvas);
+            tensorToDraw.dispose();
+        }
+        
+        startInferenceBtn.addEventListener('click', async () => {
+             if (!diffusionModel) {
+                alert("Le modèle n'est pas prêt. Veuillez générer un dataset et l'entraîner.");
+                return;
+            }
+            const contextEmoji = emojiContextInput.value;
+            let contextIdx = 0; // [MASK]
+            if(contextEmoji && EMOJI_TO_INDEX.hasOwnProperty(contextEmoji)) {
+                contextIdx = EMOJI_TO_INDEX[contextEmoji];
+            } else if (contextEmoji) {
+                alert("Emoji non trouvé dans le vocabulaire. Utilisez un emoji du dataset.");
+                return;
+            }
+            
+            inferenceState.t = TIMESTEPS - 1;
+            inferenceState.contextIdx = contextIdx;
+            if (inferenceState.x) inferenceState.x.dispose();
+            inferenceState.x = tf.randomNormal([1, IMG_SIZE, IMG_CHANNELS]);
+
+            await drawTensorToCanvas(inferenceState.x, mainCanvas);
+            noiseCtx.clearRect(0, 0, noiseCanvas.width, noiseCanvas.height);
+
+            inferenceStatusEl.textContent = "Prêt à débruiter";
+            inferenceTimestepEl.textContent = inferenceState.t.toString();
+            denoiseStepBtn.disabled = false;
+        });
+
+        denoiseStepBtn.addEventListener('click', async () => {
+            if (!diffusionModel || !inferenceState.x || inferenceState.t < 0) return;
+
+            denoiseStepBtn.disabled = true;
+            inferenceStatusEl.textContent = `Débruitage de l'étape ${inferenceState.t}...`;
+
+            const predictedNoise = tf.tidy(() => {
+                const tTensor = tf.tensor2d([[inferenceState.t]], [1, 1], 'int32');
+                const contextTensor = tf.tensor2d([[inferenceState.contextIdx]], [1, 1], 'int32');
+                return diffusionModel.apply([inferenceState.x, tTensor, contextTensor]);
+            });
+            
+            await drawTensorToCanvas(predictedNoise, noiseCanvas);
+
+            const newX = tf.tidy(() => {
+                const alphaT = alphas.gather(inferenceState.t);
+                const alphaBarT = alphasCumprod.gather(inferenceState.t);
+                const oneOverSqrtAlphaT = tf.div(1, tf.sqrt(alphaT));
+                const betaT = betas.gather(inferenceState.t);
+                const term1 = tf.mul(predictedNoise, tf.div(betaT, tf.sqrt(tf.sub(1, alphaBarT))));
+                const term2 = tf.mul(oneOverSqrtAlphaT, tf.sub(inferenceState.x, term1));
+                
+                let finalX;
+                if (inferenceState.t > 0) {
+                    const z = tf.randomNormal(inferenceState.x.shape);
+                    const posteriorVariance = tf.mul(
+                        tf.div(tf.sub(1, alphasCumprod.gather(inferenceState.t - 1)), tf.sub(1, alphaBarT)),
+                        betaT
+                    );
+                    finalX = tf.add(term2, tf.mul(tf.sqrt(posteriorVariance), z));
+                } else {
+                    finalX = term2;
+                }
+                return finalX;
+            });
+            
+            predictedNoise.dispose();
+            if (inferenceState.x) inferenceState.x.dispose();
+            inferenceState.x = tf.keep(newX);
+            
+            await drawTensorToCanvas(inferenceState.x, mainCanvas);
+            inferenceState.t--;
+
+            if (inferenceState.t < 0) {
+                inferenceStatusEl.textContent = "Terminé !";
+                inferenceTimestepEl.textContent = "0";
+                denoiseStepBtn.disabled = true;
+            } else {
+                inferenceStatusEl.textContent = "Prêt pour la prochaine étape";
+                inferenceTimestepEl.textContent = inferenceState.t.toString();
+                denoiseStepBtn.disabled = false;
+            }
+        });
+
+
+        // --- App Initialization ---
+        function initializeApp() {
+            tabButtons.forEach(button => {
+                button.addEventListener('click', () => {
+                    const targetTab = button.dataset.tab;
+                    tabButtons.forEach(btn => btn.classList.remove('active'));
+                    button.classList.add('active');
+                    Object.values(tabs).forEach(content => content.classList.remove('active'));
+                    tabs[targetTab].classList.add('active');
+                    if (targetTab === 'training') drawLossChart();
+                });
+            });
+
+            mainCtx.fillStyle = '#d1d5db';
+            mainCtx.fillRect(0, 0, mainCanvas.width, mainCanvas.height);
+            mainCtx.fillStyle = 'black';
+            mainCtx.textAlign = 'center';
+            mainCtx.font = '16px sans-serif';
+            mainCtx.fillText("En attente de génération...", mainCanvas.width / 2, mainCanvas.height / 2);
+
+            console.log("Application initialisée. Veuillez générer un dataset.");
+        }
+
+        initializeApp();
+
+    </script>
+</body>
+</html>
