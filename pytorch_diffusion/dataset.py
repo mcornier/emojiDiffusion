@@ -44,27 +44,88 @@ def generate_emoji_image(emoji: str, image_size: int, font_path: str = None):
     """
     image = Image.new("RGB", (image_size, image_size), "white")
     draw = ImageDraw.Draw(image)
+    # Debug: dessiner un carré de bordure pour visualiser le cadre
+    draw.rectangle([0, 0, image_size-1, image_size-1], outline="red")
 
     try:
+        import platform
+        font_size = int(image_size * 0.5)
+        font_loaded = False
+        tried_fonts = []
+
+        # 1. User-provided font
         if font_path and os.path.exists(font_path):
-            # Adjust font size; this often requires experimentation
-            # A common starting point is a large fraction of the image size
-            font_size = int(image_size * 0.8)
-            font = ImageFont.truetype(font_path, font_size)
-        else:
-            # Attempt to load a default font if no specific path is given or if it fails
+            print(f"[DEBUG] generate_emoji_image: Trying font_path={font_path} font_size={font_size}")
             try:
-                font_size = int(image_size * 0.8)
-                font = ImageFont.truetype("arial.ttf", font_size) # Common on Windows
-            except IOError:
+                font = ImageFont.truetype(font_path, font_size)
+                print(f"[DEBUG] generate_emoji_image: Loaded font {font_path} successfully")
+                font_loaded = True
+            except Exception as e:
+                print(f"[DEBUG] generate_emoji_image: Failed to load user font {font_path}: {e}")
+                tried_fonts.append(font_path)
+
+        # 2. System emoji fonts by OS
+        if not font_loaded:
+            system = platform.system()
+            font_candidates = []
+            if system == "Windows":
+                font_candidates = [
+                    "seguiemj.ttf",  # Segoe UI Emoji
+                    "arial.ttf"
+                ]
+                font_dirs = [
+                    os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts")
+                ]
+            elif system == "Darwin":
+                font_candidates = [
+                    "Apple Color Emoji.ttc",
+                    "Arial Unicode.ttf"
+                ]
+                font_dirs = [
+                    "/System/Library/Fonts",
+                    "/Library/Fonts"
+                ]
+            else:  # Assume Linux
+                font_candidates = [
+                    "NotoColorEmoji.ttf",
+                    "DejaVuSans.ttf"
+                ]
+                font_dirs = [
+                    "/usr/share/fonts/truetype/noto",
+                    "/usr/share/fonts/truetype/dejavu",
+                    "/usr/share/fonts/truetype/freefont",
+                    "/usr/share/fonts"
+                ]
+            # Try to find and load a font
+            for font_name in font_candidates:
+                for font_dir in font_dirs:
+                    font_file = os.path.join(font_dir, font_name)
+                    if os.path.exists(font_file):
+                        tried_fonts.append(font_file)
+                        try:
+                            font = ImageFont.truetype(font_file, font_size)
+                            print(f"[DEBUG] generate_emoji_image: Loaded system font {font_file} successfully")
+                            font_loaded = True
+                            break
+                        except Exception as e:
+                            print(f"[DEBUG] generate_emoji_image: Failed to load system font {font_file}: {e}")
+                if font_loaded:
+                    break
+
+        # 3. Fallbacks
+        if not font_loaded:
+            try:
+                font = ImageFont.truetype("arial.ttf", font_size)
+                print(f"[DEBUG] generate_emoji_image: Loaded fallback arial.ttf")
+                font_loaded = True
+            except Exception:
                 try:
-                    font = ImageFont.truetype("DejaVuSans.ttf", font_size) # Common on Linux
-                except IOError:
-                    # Fallback to a very basic default font if specific ones are not found
+                    font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+                    print(f"[DEBUG] generate_emoji_image: Loaded fallback DejaVuSans.ttf")
+                    font_loaded = True
+                except Exception:
                     font = ImageFont.load_default()
-                    # Default font might not scale well, so textbbox might be needed to center
-                    # For simplicity here, we'll use it as is.
-                    print("Warning: Specific emoji font not found. Using PIL default font. Emoji rendering might be suboptimal.")
+                    print(f"[DEBUG] generate_emoji_image: Loaded PIL default font. Tried: {tried_fonts}")
 
         # Get text dimensions using textbbox (Pillow 8.0.0+) or textsize (older)
         if hasattr(draw, 'textbbox'): # Pillow 8.0.0+
@@ -81,7 +142,11 @@ def generate_emoji_image(emoji: str, image_size: int, font_path: str = None):
             x = (image_size - text_width) / 2
             y = (image_size - text_height) / 2
 
-        draw.text((x, y), emoji, fill="black", font=font)
+        try:
+            draw.text((x, y), emoji, fill="black", font=font)
+            print(f"[DEBUG] generate_emoji_image: Drew emoji '{emoji}' at ({x},{y}) with font {font_path}")
+        except Exception as e:
+            print(f"[DEBUG] generate_emoji_image: ERROR drawing emoji '{emoji}' at ({x},{y}) with font {font_path}: {e}")
 
     except Exception as e:
         print(f"Error loading font or drawing emoji {emoji}: {e}. Drawing simple text.")
@@ -113,6 +178,8 @@ def create_emoji_dataset(emoji_list: list[str], image_size: int, font_path: str 
     """
     updated_vocab, updated_emoji_to_index = update_emoji_vocab(emoji_list)
 
+    print(f"[DEBUG] create_emoji_dataset: font_path={font_path}, emoji_list_len={len(emoji_list)}")
+
     pil_images = []
     context_indices = []
 
@@ -126,6 +193,7 @@ def create_emoji_dataset(emoji_list: list[str], image_size: int, font_path: str 
 
 
     if not pil_images:
+        print(f"[DEBUG] create_emoji_dataset: NO IMAGES GENERATED for font_path={font_path}")
         # Return empty tensors and current vocab if no images were generated
         return torch.empty(0, 3, image_size, image_size), torch.empty(0, dtype=torch.long), updated_vocab, updated_emoji_to_index
 

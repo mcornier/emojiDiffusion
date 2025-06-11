@@ -2,9 +2,9 @@ import sys
 import os
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QDoubleSpinBox,
-    QGroupBox, QProgressBar, QFileDialog, QMessageBox, QLineEdit
+    QGroupBox, QProgressBar, QFileDialog, QMessageBox, QLineEdit, QGridLayout
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 
 # Matplotlib imports for plotting loss
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
