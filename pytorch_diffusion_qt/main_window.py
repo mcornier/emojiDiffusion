@@ -17,7 +17,7 @@ except ImportError:
     from inference_tab_v2 import InferenceTabV2
 
 # Backend imports
-from pytorch_diffusion.model_v2 import DiffusionModelV2
+from pytorch_diffusion.model import DiffusionModel
 from pytorch_diffusion.utils import get_device
 
 

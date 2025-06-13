@@ -17,19 +17,19 @@ if module_path not in sys.path:
     sys.path.append(module_path)
 
 try:
-    from pytorch_diffusion.utils_v2 import load_model_v2, generate_from_visual_prompt, tensor_to_pil_v2
+    from pytorch_diffusion.utils import load_model, generate_from_visual_prompt, tensor_to_pil, get_device
     from pytorch_diffusion.utils_v2_manual import ManualDiffusionSampler, create_noise_visualization
-    from pytorch_diffusion.model_v2 import DiffusionModelV2
-    from pytorch_diffusion.dataset_v2 import ImageDatasetV2
-    from pytorch_diffusion.utils import get_device
+    from pytorch_diffusion.model import DiffusionModel
+    from pytorch_diffusion.dataset import ImageDataset
     try:
         from .paint_8x8_widget import Paint8x8Widget
     except ImportError:
         from paint_8x8_widget import Paint8x8Widget
     import random
 except ImportError as e:
-    print(f"Error importing V2 modules: {e}")
-    load_model_v2 = None
+    print(f"Error importing modules: {e}")
+    load_model = None
+    ManualDiffusionSampler = None
 
 class InferenceThread(QThread):
     """Thread for running inference without blocking the UI"""
@@ -49,31 +49,13 @@ class InferenceThread(QThread):
             self.progress_updated.emit(f"Generating {self.num_samples} images with {self.inference_steps} steps...")
             device = get_device()
             
-            # Import needed for custom steps
-            from pytorch_diffusion.utils_v2 import p_sample_loop_v2, pil_to_tensor_v2
-            
-            # Prepare visual context (8x8)
-            context_tensor = pil_to_tensor_v2(self.prompt_image, target_size=(8, 8))  # (1, 3, 8, 8)
-            context_batch = context_tensor.repeat(self.num_samples, 1, 1, 1).to(device)  # (num_samples, 3, 8, 8)
-            
-            # Generate images with custom number of steps
-            with torch.no_grad():
-                generated_tensor, history = p_sample_loop_v2(
-                    self.model, 
-                    context_batch, 
-                    num_timesteps=self.inference_steps,
-                    device=device
-                )
-            
-            # Convert to PIL images
-            from pytorch_diffusion.utils_v2 import tensor_to_pil_v2
-            generated_images = []
-            for i in range(self.num_samples):
-                img = tensor_to_pil_v2(generated_tensor[i])
-                generated_images.append(img)
-            
-            # Also return the conditioning image
-            conditioning_image = tensor_to_pil_v2(context_tensor[0])
+            # Use the new architecture for inference
+            generated_images, conditioning_image = generate_from_visual_prompt(
+                model=self.model,
+                prompt_image=self.prompt_image,
+                num_samples=self.num_samples,
+                device=device
+            )
             
             self.inference_finished.emit(generated_images, conditioning_image)
             
@@ -275,7 +257,7 @@ class InferenceTabV2(QWidget):
             
             # Load model
             device = get_device()
-            self.model = load_model_v2(model_path, device)
+            self.model = load_model(model_path, device)
             
             self.model_status_label.setText(f"✅ Model loaded successfully from {os.path.basename(model_path)}")
             self.load_model_button.setEnabled(True)
@@ -424,7 +406,7 @@ class InferenceTabV2(QWidget):
         
         try:
             # Create dataset loader
-            dataset = ImageDatasetV2(dataset_path)
+            dataset = ImageDataset(dataset_path)
             
             if len(dataset) == 0:
                 QMessageBox.warning(self, "Empty Dataset", "No images found in dataset")
@@ -657,7 +639,7 @@ class InferenceTabV2(QWidget):
             current_display.setMaximumSize(128, 128)
             current_display.setStyleSheet("border: 2px solid orange; background: white;")
             current_display.setScaledContents(True)
-            current_pil = tensor_to_pil_v2(state['image'])
+            current_pil = tensor_to_pil(state['image'])
             current_qimage = QImage(current_pil.tobytes(), current_pil.width, current_pil.height, QImage.Format_RGB888)
             current_pixmap = QPixmap.fromImage(current_qimage)
             current_display.setPixmap(current_pixmap)
@@ -689,7 +671,7 @@ class InferenceTabV2(QWidget):
                 next_display.setMaximumSize(128, 128)
                 next_display.setStyleSheet("border: 2px solid green; background: white;")
                 next_display.setScaledContents(True)
-                next_pil = tensor_to_pil_v2(self._previous_image)
+                next_pil = tensor_to_pil(self._previous_image)
                 next_qimage = QImage(next_pil.tobytes(), next_pil.width, next_pil.height, QImage.Format_RGB888)
                 next_pixmap = QPixmap.fromImage(next_qimage)
                 next_display.setPixmap(next_pixmap)
@@ -791,7 +773,7 @@ class InferenceTabV2(QWidget):
         
         try:
             # Create dataset loader
-            dataset = ImageDatasetV2(dataset_path)
+            dataset = ImageDataset(dataset_path)
             
             if len(dataset) == 0:
                 QMessageBox.warning(self, "Empty Dataset", "No images found in dataset")

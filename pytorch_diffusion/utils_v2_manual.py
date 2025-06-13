@@ -1,255 +1,251 @@
 import torch
-import torchvision
-from PIL import Image
 import numpy as np
+from PIL import Image
+import torchvision
+from .utils import (
+    get_device, tensor_to_pil, TIMESTEPS, BETAS, ALPHAS, ALPHAS_CUMPROD, 
+    SQRT_ALPHAS_CUMPROD, SQRT_ONE_MINUS_ALPHAS_CUMPROD, POSTERIOR_VARIANCE
+)
 
-try:
-    from .model_v2 import DiffusionModelV2
-    from .utils import get_device, linear_beta_schedule
-except ImportError:
-    # For direct execution
-    from model_v2 import DiffusionModelV2
-    from utils import get_device, linear_beta_schedule
-
-# --- Manual Step-by-Step Diffusion ---
-class ManualDiffusionSampler:
-    """Manual step-by-step diffusion sampler for educational purposes"""
+def create_noise_visualization(noise_tensor):
+    """Create a visualization of predicted noise for display"""
+    if noise_tensor.dim() == 4:
+        noise_tensor = noise_tensor[0]  # Take first batch item if needed
     
-    def __init__(self, model, visual_context, timesteps=200, device=None):
+    # Normalize noise to [0, 1] for visualization
+    noise_normalized = (noise_tensor - noise_tensor.min()) / (noise_tensor.max() - noise_tensor.min() + 1e-8)
+    
+    # Convert to PIL
+    return torchvision.transforms.ToPILImage()(noise_normalized.cpu())
+
+class ManualDiffusionSampler:
+    """
+    A class for manual step-by-step diffusion sampling, allowing users to
+    observe each denoising step in the process.
+    """
+    
+    def __init__(self, model, visual_context, timesteps=TIMESTEPS, device=None):
         """
+        Initialize the manual sampler.
+        
         Args:
-            model: DiffusionModelV2
-            visual_context: (B, 3, 8, 8) visual conditioning tensor
-            timesteps: Number of diffusion steps
-            device: Device for computation
+            model: The trained diffusion model
+            visual_context: Visual conditioning tensor (B, 3, 8, 8)
+            timesteps: Total number of timesteps (default 200)
+            device: Device to run on
         """
-        if device is None:
-            device = get_device()
-        
-        self.model = model.to(device)
-        self.model.eval()
-        self.device = device
+        self.model = model
+        self.visual_context = visual_context
         self.timesteps = timesteps
+        self.device = device or get_device()
         
-        # Ensure visual context is on correct device
-        self.visual_context = visual_context.to(device)
-        self.batch_size = visual_context.shape[0]
+        # Move everything to device
+        self.model.to(self.device)
+        self.visual_context = self.visual_context.to(self.device)
         
-        # Diffusion schedule
-        self.betas = linear_beta_schedule(timesteps).to(device)
-        self.alphas = 1.0 - self.betas
-        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
-        self.alphas_cumprod_prev = torch.nn.functional.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
-        
-        # For sampling
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
-        self.posterior_variance = self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
-        
-        # State
-        self.current_t = timesteps - 1  # Start at t=T-1 (199 for 200 steps)
-        self.current_image = None
-        self.last_predicted_noise = None
-        self.history = []
-        
+        # Initialize the sampling
         self.reset()
     
     def reset(self):
         """Reset to initial noise state"""
-        self.current_t = self.timesteps - 1
-        shape = (self.batch_size, 3, 64, 64)
-        self.current_image = torch.randn(shape, device=self.device)
-        self.last_predicted_noise = None
-        self.history = []
+        batch_size = self.visual_context.shape[0]
+        shape = (batch_size, 3, 64, 64)
         
-        # Store initial state
-        self.history.append({
-            'timestep': self.current_t,
-            'image': self.current_image.clone(),
-            'predicted_noise': None,
-            'info': 'Initial random noise'
-        })
+        # Start with random noise
+        self.current_image = torch.randn(shape, device=self.device)
+        self.current_timestep = self.timesteps - 1  # Start from T-1
+        self.current_step = 0
+        self.predicted_noise = None
+        self.is_complete = False
+        
+        print(f"Manual sampler reset: Starting from timestep {self.current_timestep}")
     
     def step(self):
-        """Perform one denoising step"""
-        if self.current_t < 0:
-            return False  # Already finished
+        """
+        Perform one denoising step.
         
-        # Current timestep tensor
-        t_tensor = torch.full((self.batch_size,), self.current_t, device=self.device, dtype=torch.long)
+        Returns:
+            bool: True if step was successful, False if already finished
+        """
+        if self.is_complete:
+            return False
         
-        # Predict noise with model
+        # Current timestep for model input
+        t_int = self.current_timestep
+        batch_size = self.current_image.shape[0]
+        t = torch.full((batch_size,), t_int, device=self.device, dtype=torch.long)
+        
+        # Get model prediction
         with torch.no_grad():
-            predicted_noise = self.model(self.current_image, t_tensor, self.visual_context)
-        
-        self.last_predicted_noise = predicted_noise.clone()
+            self.predicted_noise = self.model(self.current_image, t, self.visual_context)
         
         # Perform denoising step
-        if self.current_t > 0:
-            # Not the final step
-            beta_t = self.betas[self.current_t]
-            sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[self.current_t]
-            sqrt_recip_alpha_t = torch.sqrt(1.0 / self.alphas[self.current_t])
-            
-            # Equation 11 from DDPM paper
-            model_mean = sqrt_recip_alpha_t * (self.current_image - beta_t * predicted_noise / sqrt_one_minus_alpha_cumprod_t)
-            
-            # Add noise for non-final steps
-            posterior_variance_t = self.posterior_variance[self.current_t]
+        device = self.device
+        betas_t = BETAS.to(device)[t_int]
+        sqrt_one_minus_alphas_cumprod_t = SQRT_ONE_MINUS_ALPHAS_CUMPROD.to(device)[t_int]
+        sqrt_recip_alphas_t = torch.sqrt(1.0 / ALPHAS.to(device)[t_int])
+
+        # DDPM denoising equation
+        model_mean = sqrt_recip_alphas_t * (
+            self.current_image - betas_t * self.predicted_noise / sqrt_one_minus_alphas_cumprod_t
+        )
+
+        if t_int == 0:
+            # Last step - no noise added
+            self.current_image = model_mean
+            self.is_complete = True
+        else:
+            # Add posterior noise
+            posterior_variance_t = POSTERIOR_VARIANCE.to(device)[t_int]
             noise = torch.randn_like(self.current_image)
             self.current_image = model_mean + torch.sqrt(posterior_variance_t) * noise
-            
-            info = f"Denoising step t={self.current_t} → t={self.current_t-1}"
-        else:
-            # Final step (t=0) - no noise added
-            beta_t = self.betas[self.current_t]
-            sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[self.current_t]
-            sqrt_recip_alpha_t = torch.sqrt(1.0 / self.alphas[self.current_t])
-            
-            self.current_image = sqrt_recip_alpha_t * (self.current_image - beta_t * predicted_noise / sqrt_one_minus_alpha_cumprod_t)
-            info = f"Final step t={self.current_t} → DONE"
         
-        # Store step in history
-        self.history.append({
-            'timestep': self.current_t,
-            'image': self.current_image.clone(),
-            'predicted_noise': predicted_noise.clone(),
-            'info': info
-        })
+        # Update counters
+        self.current_timestep -= 1
+        self.current_step += 1
         
-        # Move to next timestep
-        self.current_t -= 1
+        print(f"Step {self.current_step}: t={t_int} -> t={self.current_timestep}")
         
-        return True  # Step successful
-    
-    def step_multiple(self, num_steps):
-        """Perform multiple denoising steps"""
-        results = []
-        for _ in range(num_steps):
-            if not self.step():
-                break  # Finished
-            results.append(self.get_current_state())
-        return results
-    
-    def get_current_state(self):
-        """Get current state information"""
-        return {
-            'timestep': self.current_t + 1,  # +1 because we decremented after step
-            'image': self.current_image.clone(),
-            'predicted_noise': self.last_predicted_noise.clone() if self.last_predicted_noise is not None else None,
-            'progress_percent': ((self.timesteps - 1 - self.current_t) / self.timesteps) * 100,
-            'is_finished': self.current_t < 0
-        }
+        return True
     
     def is_finished(self):
         """Check if sampling is complete"""
-        return self.current_t < 0
+        return self.is_complete
+    
+    def get_current_state(self):
+        """
+        Get the current state of the sampler for display.
+        
+        Returns:
+            dict: Contains current image, timestep, progress, etc.
+        """
+        progress_percent = (self.current_step / self.timesteps) * 100
+        
+        # Calculate current variance for display
+        if self.current_timestep >= 0 and self.current_timestep < len(POSTERIOR_VARIANCE):
+            variance = POSTERIOR_VARIANCE[self.current_timestep].item()
+        else:
+            variance = 0.0
+        
+        return {
+            'image': self.current_image[0].clone(),  # First batch item
+            'timestep': self.current_timestep,
+            'step': self.current_step,
+            'progress_percent': progress_percent,
+            'predicted_noise': self.predicted_noise[0].clone() if self.predicted_noise is not None else None,
+            'is_finished': self.is_complete,
+            'variance': f"{variance:.6f}"
+        }
     
     def get_final_image(self):
-        """Get the final denoised image"""
-        if not self.is_finished():
-            return None
-        return self.current_image.clone()
+        """Get the final generated image as PIL"""
+        if not self.is_complete:
+            print("Warning: Sampling not complete yet")
+        
+        return tensor_to_pil(self.current_image[0])
     
-    def get_history_images(self, every_n_steps=10):
-        """Get history of images at regular intervals"""
-        images = []
-        for i, state in enumerate(self.history):
-            if i % every_n_steps == 0 or i == len(self.history) - 1:
-                images.append({
-                    'timestep': state['timestep'],
-                    'image': state['image'],
-                    'info': state['info']
-                })
+    def skip_to_step(self, target_step):
+        """
+        Skip ahead to a specific step (for slider interaction).
+        
+        Args:
+            target_step: Target step number (0 to timesteps-1)
+        """
+        if target_step < self.current_step:
+            # Need to reset and step forward
+            self.reset()
+        
+        # Step forward to target
+        while self.current_step < target_step and not self.is_complete:
+            self.step()
+    
+    def get_progress_images(self, num_images=10):
+        """
+        Generate a sequence of images showing the denoising progress.
+        
+        Args:
+            num_images: Number of intermediate images to generate
+            
+        Returns:
+            List of PIL images showing denoising progression
+        """
+        # Save current state
+        original_step = self.current_step
+        original_timestep = self.current_timestep
+        original_image = self.current_image.clone()
+        original_complete = self.is_complete
+        
+        # Reset and generate progression
+        self.reset()
+        images = [tensor_to_pil(self.current_image[0])]  # Initial noise
+        
+        step_interval = max(1, self.timesteps // num_images)
+        
+        for step in range(0, self.timesteps, step_interval):
+            while self.current_step < step and not self.is_complete:
+                self.step()
+            if not self.is_complete or step == self.timesteps - 1:
+                images.append(tensor_to_pil(self.current_image[0]))
+        
+        # Restore original state
+        self.current_step = original_step
+        self.current_timestep = original_timestep
+        self.current_image = original_image
+        self.is_complete = original_complete
+        
         return images
 
-def tensor_to_pil_v2(image_tensor: torch.Tensor):
-    """Converts a [-1, 1] normalized tensor to a PIL Image (for 64x64)."""
-    image_tensor = (image_tensor + 1) / 2  # Denormalize to [0, 1]
-    image_tensor = image_tensor.clamp(0, 1)
-    # If batch, take the first image
-    if image_tensor.ndim == 4:
-        image_tensor = image_tensor[0]
-    return torchvision.transforms.ToPILImage()(image_tensor.cpu())
-
-def create_noise_visualization(noise_tensor):
-    """Create a visualization of predicted noise"""
-    # Normalize noise for visualization
-    noise = noise_tensor.clone()
-    if noise.ndim == 4:
-        noise = noise[0]  # Take first batch
-    
-    # Normalize to [0, 1] for visualization
-    noise_min = noise.min()
-    noise_max = noise.max()
-    if noise_max > noise_min:
-        noise = (noise - noise_min) / (noise_max - noise_min)
-    else:
-        noise = torch.zeros_like(noise)
-    
-    return torchvision.transforms.ToPILImage()(noise.cpu())
 
 # Test the manual sampler
 if __name__ == '__main__':
-    device = get_device()
-    print(f"Testing manual sampler on device: {device}")
+    import sys
+    import os
     
-    # Create a dummy model for testing
-    model = DiffusionModelV2(
+    # Add parent directory to path for imports
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    
+    from pytorch_diffusion.model import DiffusionModel
+    
+    device = get_device()
+    print(f"Testing ManualDiffusionSampler on device: {device}")
+    
+    # Create a dummy model
+    model = DiffusionModel(
         img_size=64,
+        patch_size=8,
         img_channels=3,
         latent_dim=256,
         time_dim=64,
-        visual_context_dim=192,
-        num_transformer_blocks=3,
-        num_heads=4,
-        initial_conv_filters=32,
-        conv_dim_mults=(1, 2, 4, 8)
+        num_transformer_blocks=4,
+        num_heads=8
     ).to(device)
     
     # Create dummy visual context
     visual_context = torch.randn(1, 3, 8, 8, device=device)
     
-    print("Testing manual diffusion sampler...")
+    # Test manual sampler
     try:
-        # Create sampler
-        sampler = ManualDiffusionSampler(model, visual_context, timesteps=10, device=device)  # Short test
+        sampler = ManualDiffusionSampler(model, visual_context, timesteps=10, device=device)
         
-        print(f"Initial state: t={sampler.current_t}, finished={sampler.is_finished()}")
-        
-        # Perform a few steps
+        print("Testing manual steps...")
         for i in range(5):
-            if sampler.step():
+            if not sampler.is_finished():
+                success = sampler.step()
                 state = sampler.get_current_state()
-                print(f"Step {i+1}: t={state['timestep']}, progress={state['progress_percent']:.1f}%, finished={state['is_finished']}")
-            else:
-                print(f"Step {i+1}: Sampling finished")
-                break
+                print(f"Step {i+1}: timestep={state['timestep']}, progress={state['progress_percent']:.1f}%")
         
-        # Test multiple steps
-        print("\nTesting multiple steps...")
-        remaining_steps = 5
-        results = sampler.step_multiple(remaining_steps)
-        print(f"Performed {len(results)} more steps")
+        print("Testing reset...")
+        sampler.reset()
+        state = sampler.get_current_state()
+        print(f"After reset: timestep={state['timestep']}, step={state['step']}")
         
-        # Final state
-        final_state = sampler.get_current_state()
-        print(f"Final state: finished={final_state['is_finished']}, progress={final_state['progress_percent']:.1f}%")
+        print("Testing progress images...")
+        progress_imgs = sampler.get_progress_images(num_images=3)
+        print(f"Generated {len(progress_imgs)} progress images")
         
-        # Test image conversion
-        if sampler.history:
-            test_image = sampler.history[0]['image']
-            pil_img = tensor_to_pil_v2(test_image)
-            print(f"PIL conversion: {pil_img.size}")
-        
-        # Test noise visualization
-        if sampler.last_predicted_noise is not None:
-            noise_vis = create_noise_visualization(sampler.last_predicted_noise)
-            print(f"Noise visualization: {noise_vis.size}")
-        
-        print("✅ Manual sampler working correctly!")
+        print("✅ ManualDiffusionSampler working correctly!")
         
     except Exception as e:
-        print(f"❌ Manual sampler error: {e}")
+        print(f"❌ Error testing ManualDiffusionSampler: {e}")
         import traceback
         traceback.print_exc()

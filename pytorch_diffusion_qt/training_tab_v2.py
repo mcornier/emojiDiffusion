@@ -21,13 +21,13 @@ if module_path not in sys.path:
     sys.path.append(module_path)
 
 try:
-    from pytorch_diffusion.train_v2 import train_diffusion_model_v2
-    from pytorch_diffusion.dataset_v2 import ImageDatasetV2
+    from pytorch_diffusion.train import train_diffusion_model
+    from pytorch_diffusion.dataset import ImageDataset
     from pytorch_diffusion.utils import get_device
     import random
 except ImportError as e:
-    print(f"Error importing V2 training modules: {e}")
-    train_diffusion_model_v2 = None
+    print(f"Error importing training modules: {e}")
+    train_diffusion_model = None
 
 class LossPlotWidget(FigureCanvas):
     """Widget for plotting training loss in real-time"""
@@ -151,7 +151,7 @@ class TrainingThread(QThread):
                         self.thread.checkpoint_saved.emit(path)
 
             # Start training with callbacks
-            model = train_diffusion_model_v2(
+            model = train_diffusion_model(
                 dataset_root=self.training_params['dataset_root'],
                 epochs=self.training_params['epochs'],
                 batch_size=self.training_params['batch_size'],
@@ -429,7 +429,7 @@ class TrainingTabV2(QWidget):
                 return
 
             # Check dataset
-            dataset = ImageDatasetV2(dataset_path)
+            dataset = ImageDataset(dataset_path)
             num_images = len(dataset)
             
             if num_images == 0:
